@@ -171,6 +171,20 @@ Install [MinGW](http://www.mingw.org/) ([installer](http://sourceforge.net/proje
 
 ### Revisions
 
+1.0.9-fix1 (November 2026)
+
+Bug fixes only; detection logic is unchanged. `tests/selftest.sh` checks them on fake data in a temporary folder.
+
+* Bugfix: a start folder given without a trailing slash overflowed its buffer and crashed.
+* Bugfix: an entry that cannot be stat'ed (e.g. a broken symlink) no longer hides the rest of its folder.
+* Bugfix: the output file is opened once, not once per path argument (ran out of file descriptors, corrupted output lines).
+* Symbolic links are never followed during the directory walk (loops, /proc).
+* The output file is recognised by device and inode, not by a substring of its name.
+* A missing path argument is reported and skipped instead of ending the run.
+* Empty files are skipped silently instead of reported as "Unknown mode".
+* Bugfix: memset cleared only part of the card buffers.
+* Bugfix: the ignore list (-i) was read into a buffer without a terminating NUL.
+
 1.0.9 (In Progress)
 
 * Better support for building on OSX.

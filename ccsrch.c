@@ -39,7 +39,7 @@
   #define SIGQUIT 3
 #endif
 
-#define PROG_VER "ccsrch 1.0.9 (c) 2012-2016 Adam Caudill <adam@adamcaudill.com>\n             (c) 2007 Mike Beekey <zaphod2718@yahoo.com>"
+#define PROG_VER "ccsrch 1.0.9-fix1 (c) 2012-2016 Adam Caudill <adam@adamcaudill.com>\n             (c) 2007 Mike Beekey <zaphod2718@yahoo.com>"
 
 #define MDBUFSIZE    512
 #define MAXPATH     2048
@@ -54,6 +54,10 @@ static char  *logfilename          = NULL;
 static const char  *currfilename   = NULL;
 static char  *ignore               = NULL;
 static FILE  *logfilefd            = NULL;
+static dev_t  logfile_dev          = 0;
+static ino_t  logfile_ino          = 0;
+static int    logfile_known        = 0;
+
 static long   total_count          = 0;
 static long   file_count           = 0;
 static long   currfile_atime       = 0;
@@ -83,7 +87,7 @@ static int    wrap                 = 0;
 
 static void initialize_buffer()
 {
-  memset(cardbuf, 0, CARDSIZE);
+  memset(cardbuf, 0, sizeof(cardbuf));
 }
 
 static void mask_pan(char *s)
@@ -360,7 +364,7 @@ static int luhn_check(int len, long offset)
   if (cardbuf[i]<=0)
     return 0;
 
-  memset(num, 0, CARDSIZE);
+  memset(num, 0, sizeof(num));
 
   for (i=0; i<len; i++)
    num[i]=cardbuf[i];
@@ -644,6 +648,11 @@ static int is_allowed_file_type(const char *name)
   return ret;
 }
 
+static int is_logfile(const struct stat *st)
+{
+  return logfile_known && st->st_dev == logfile_dev && st->st_ino == logfile_ino;
+}
+
 static int proc_dir_list(const char *instr)
 {
   DIR            *dirptr;
@@ -684,18 +693,21 @@ static int proc_dir_list(const char *instr)
       continue;
 
     snprintf(curr_path+strlen(curr_path), MAXPATH-strlen(curr_path), "%s", direntptr->d_name);
-    err = get_file_stat(curr_path, &fstat);
+    err = lstat(curr_path, &fstat);
 
-    if (err == -1) {
-      if (errno == ENOENT) {
-        fprintf(stderr, "proc_dir_list: file %s not found, can't stat\n", curr_path);
-      } else {
-        fprintf(stderr, "proc_dir_list: Cannot stat file %s; errno=%d\n", curr_path, errno);
-      }
-      closedir(dirptr);
-      free(curr_path);
-      return 1;
+    if (err != 0) {
+      fprintf(stderr, "proc_dir_list: Cannot stat file %s; errno=%d; skipped\n", curr_path, errno);
+      curr_path[dir_name_len] = '\0';
+      continue;
     }
+    if ((fstat.st_mode & S_IFMT) == S_IFLNK || is_logfile(&fstat)) {
+      /* never follow symbolic links (loops, /proc); never scan our own output */
+      curr_path[dir_name_len] = '\0';
+      continue;
+    }
+    currfile_atime = fstat.st_atime;
+    currfile_mtime = fstat.st_mtime;
+    currfile_ctime = fstat.st_ctime;
     if ((fstat.st_mode & S_IFMT) == S_IFDIR) {
       snprintf(curr_path+strlen(curr_path), MAXPATH-strlen(curr_path), "/");
       proc_dir_list(curr_path);
@@ -710,17 +722,9 @@ static int proc_dir_list(const char *instr)
 	         * kludge, need to clean this up
 	         * later else any string matching in the path returns non NULL
 	         */
-	        if (logfilename != NULL) {
-	          if (strstr(curr_path, logfilename) != NULL) {
-	            fprintf(stderr, "We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", curr_path);
-            } else {
-	            ccsrch(curr_path);
-	            if (file_hit_count > 0 && print_file_hit_count == 1)
-	              printf("%s: %d hits\n", curr_path, file_hit_count);
-	          }
-	        } else {
-	          ccsrch(curr_path);
-	        }
+	        ccsrch(curr_path);
+	        if (logfilename != NULL && file_hit_count > 0 && print_file_hit_count == 1)
+	          printf("%s: %d hits\n", curr_path, file_hit_count);
         }
       }
     }
@@ -789,6 +793,14 @@ static int open_logfile()
       fprintf(stderr, "Unable to open logfile %s for writing; errno=%d\n", logfilename, errno);
       return -1;
     }
+    {
+      struct stat lst;
+      if (fstat(fileno(logfilefd), &lst) == 0) {
+        logfile_dev   = lst.st_dev;
+        logfile_ino   = lst.st_ino;
+        logfile_known = 1;
+      }
+    }
   }
   return 0;
 }
@@ -824,6 +836,7 @@ static char *read_ignore_list(const char *filename, size_t *len)
 
   if (fread(buf, 1, *len, infile) == 0)
     fprintf(stderr, "Error with reading buf from %s\n", filename);
+  buf[*len] = '\0';
   fclose(infile);
   return buf;
 }
@@ -936,15 +949,19 @@ int main(int argc, char *argv[])
   printf("\n%s\n", PROG_VER);
   printf("\nLocal start time: %s\n",ctime((time_t *)&init_time));
 
+  if (open_logfile() < 0)
+    exit(-1);
+
   for ( ; optind < argc; optind++) {
     inputstr = argv[optind];
     if (inputstr == NULL)
       usage(argv[0]);
-  
-    if (open_logfile() < 0)
-      exit(-1);
-  
-    inbuf = strdup(inputstr);
+
+    free(inbuf);
+    /* 1. room for a trailing separator and the terminating NUL */
+    inbuf = (char *)malloc(strlen(inputstr) + 2);
+    if (inbuf != NULL)
+      strcpy(inbuf, inputstr);
     if (inbuf == NULL) {
       fprintf(stderr, "strdup: cannot allocate memory erro=%d\n", errno);
       cleanup_shtuff();
@@ -970,14 +987,14 @@ int main(int argc, char *argv[])
         } else {
           fprintf(stderr, "Cannot stat file %s; errno=%d\n", inbuf, errno);
         }
-        exit(-1);
+        continue;
       }
   
       if ((ffstat.st_size > 0) && ((ffstat.st_mode & S_IFMT) == S_IFREG)) {
         memset(&tmpbuf, '\0', BSIZE);
         if (escape_space(inbuf, tmpbuf) == 0) {
           if (logfilename != NULL) {
-            if (strstr(inbuf, logfilename) != NULL) {
+            if (is_logfile(&ffstat)) {
               fprintf(stderr, "main: We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", inbuf);
             } else {
 #ifdef DEBUG
@@ -998,9 +1015,11 @@ int main(int argc, char *argv[])
           inbuf[strlen(inbuf)] = '\\';
 #else
         if ((inbuf[strlen(inbuf) - 1]) != '/')
-          inbuf[strlen(inbuf)] = '/';
+          strcat(inbuf, "/");
 #endif
         proc_dir_list(inbuf);
+      } else if ((ffstat.st_mode & S_IFMT) == S_IFREG) {
+        /* 5. empty regular file: nothing to scan, nothing to report */
       } else {
         fprintf(stderr, "main: Unknown mode returned-> %x\n", ffstat.st_mode);
       }
